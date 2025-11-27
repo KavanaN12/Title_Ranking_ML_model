@@ -5,16 +5,10 @@ import pandas as pd
 from src.features_fusion import FeatureFusionBuilder
 from src.preprocess import simple_clean
 
-# --------------------------
-# Load Model
-# --------------------------
-print("Loading ML Model...")
+# Load model
 model = joblib.load("outputs/models/xgb.joblib")
 
-# --------------------------
-# Recreate FeatureFusionBuilder EXACTLY like training
-# --------------------------
-print("Rebuilding FeatureFusionBuilder with training config...")
+# Rebuild exact feature pipeline
 fb = FeatureFusionBuilder(
     use_sbert=True,
     sbert_model_name="sentence-transformers/paraphrase-MiniLM-L6-v2",
@@ -24,18 +18,13 @@ fb = FeatureFusionBuilder(
     batch_size=32
 )
 
-# --------------------------
-# Load saved TF-IDF, SVD, scaler
-# --------------------------
+# Load saved components
 components = joblib.load("outputs/feature_builder.joblib")
 fb.tfidf_title = components["tfidf_title"]
 fb.tfidf_abs = components["tfidf_abs"]
 fb.svd = components["svd"]
 fb.scaler = components["scaler"]
 
-# --------------------------
-# Prediction Function
-# --------------------------
 def predict_score():
     title = title_input.get("1.0", tk.END).strip()
     abstract = abstract_input.get("1.0", tk.END).strip()
@@ -49,16 +38,9 @@ def predict_score():
         "abstract": simple_clean(abstract)
     }])
 
-    # Build feature matrix using EXACT SAME pipeline
-    X, _, _ = fb.build_feature_matrix(
-        df,
-        fit_tfidf=False,
-        return_vectors=False
-    )
-
+    X, _, _ = fb.build_feature_matrix(df, fit_tfidf=False, return_vectors=False)
     score = float(model.predict(X)[0])
 
-    # Interpretation
     if score < 0.2:
         level = "Very Weak Match"
     elif score < 0.4:
@@ -70,31 +52,21 @@ def predict_score():
     else:
         level = "Excellent Match"
 
-    result_label.config(
-        text=f"🔢 Score: {score:.4f}\n📊 Relevance: {level}"
-    )
+    result_label.config(text=f"🔢 Score: {score:.4f}\n📊 Relevance: {level}")
 
-# --------------------------
-# GUI Layout
-# --------------------------
 root = tk.Tk()
 root.title("Title–Abstract Relevance Predictor")
 root.geometry("700x600")
 
-title_lbl = ttk.Label(root, text="Enter Title:", font=("Arial", 12))
-title_lbl.pack(pady=5)
-
+ttk.Label(root, text="Enter Title:", font=("Arial", 12)).pack(pady=5)
 title_input = scrolledtext.ScrolledText(root, height=4, width=80)
 title_input.pack()
 
-abstract_lbl = ttk.Label(root, text="Enter Abstract:", font=("Arial", 12))
-abstract_lbl.pack(pady=5)
-
+ttk.Label(root, text="Enter Abstract:", font=("Arial", 12)).pack(pady=5)
 abstract_input = scrolledtext.ScrolledText(root, height=10, width=80)
 abstract_input.pack()
 
-predict_btn = ttk.Button(root, text="Predict Score", command=predict_score)
-predict_btn.pack(pady=20)
+ttk.Button(root, text="Predict Score", command=predict_score).pack(pady=20)
 
 result_label = ttk.Label(root, text="", font=("Arial", 14))
 result_label.pack(pady=10)
