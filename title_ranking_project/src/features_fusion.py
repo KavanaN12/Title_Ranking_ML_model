@@ -1,154 +1,163 @@
 # src/features_fusion.py
-
-import numpy as np
 import joblib
-from tqdm import tqdm
+import numpy as np
+import os
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.decomposition import TruncatedSVD
-from sklearn.preprocessing import MinMaxScaler
-from sentence_transformers import SentenceTransformer, util
+from sklearn.preprocessing import StandardScaler
+from sentence_transformers import SentenceTransformer
+
+from src.preprocess import simple_clean
+
 
 class FeatureFusionBuilder:
-    def __init__(self,
-                 use_sbert=True,
-                 sbert_model_name="sentence-transformers/paraphrase-MiniLM-L6-v2",
-                 tfidf_title_max=5000,
-                 tfidf_abs_max=20000,
-                 svd_components=300,
-                 batch_size=32):
+    """
+    Unified and stable feature builder used for:
+      - run_pipeline_final.py (LightGBM training)
+      - model_test_lgb.py      (evaluation)
+      - gui_app.py             (real-time prediction)
 
+    Produces EXACT 10-feature vector used for LightGBM training.
+    """
+
+    def __init__(self, use_sbert=True, sbert_model_name=None, batch_size=32):
         self.use_sbert = use_sbert
         self.sbert_model_name = sbert_model_name
         self.batch_size = batch_size
 
-        # TF-IDF models
-        self.tfidf_title = None
-        self.tfidf_abs = None
-
-        # Dimensionality reducer
+        # Model components
+        self.sbert = None
+        self.tfidf = None
         self.svd = None
-
-        # Scaler (IMPORTANT)
         self.scaler = None
 
-        self.sbert = None  # lazy-loaded
-
-    # -------------------------
-    # SBERT embedding
-    # -------------------------
+    # ---------------------------------------------------------
+    # SBERT Loader
+    # ---------------------------------------------------------
     def load_sbert(self):
-        if self.sbert is None:
-            print(f"Loading SBERT: {self.sbert_model_name}")
+        if self.use_sbert and self.sbert is None:
+            print("Loading SBERT:", self.sbert_model_name)
             self.sbert = SentenceTransformer(self.sbert_model_name)
-        return self.sbert
 
-    def compute_embeddings(self, texts, use_cache_path=None):
-        """
-        Compute SBERT embeddings with caching support.
-        """
-        model = self.load_sbert()
-
-        if use_cache_path is not None:
-            try:
-                cached = joblib.load(use_cache_path)
-                if "title_emb" in cached and "abstract_emb" in cached:
-                    print(f"Loading cached embeddings from {use_cache_path}")
-                    return cached["title_emb"], cached["abstract_emb"]
-            except:
-                pass  # no cache; continue
-
-        print("SBERT batches:")
-        emb = []
-        for i in tqdm(range(0, len(texts), self.batch_size)):
-            batch = texts[i:i + self.batch_size].tolist()
-            emb.append(model.encode(batch, convert_to_numpy=True))
-
-        embeddings = np.vstack(emb)
-        return embeddings
-
-    # -------------------------
-    # Main Feature Builder
-    # -------------------------
-    def build_feature_matrix(self, df, fit_tfidf=True, use_cache_path=None, return_vectors=False):
-        """
-        IMPORTANT FIX:
-        - During training: fit_tfidf=True → fit TF-IDF, SVD, SCALER.
-        - During inference: fit_tfidf=False → use ONLY transform(), NEVER fit().
-        """
-
-        titles = df["title"].tolist()
-        abstracts = df["abstract"].tolist()
-
-        # ============= SBERT FEATURES =============
-        if self.use_sbert:
-            # embeddings recomputed for inference
-            title_emb = self.compute_embeddings(df["title"])
-            abs_emb = self.compute_embeddings(df["abstract"])
-
-            sbert_cos = np.sum(title_emb * abs_emb, axis=1) / (
-                np.linalg.norm(title_emb, axis=1) * np.linalg.norm(abs_emb, axis=1)
+    # ---------------------------------------------------------
+    # SBERT encoder for titles/abstracts
+    # ---------------------------------------------------------
+    def encode_sbert(self, texts):
+        if self.sbert is None:
+            self.load_sbert()
+        return np.array(
+            self.sbert.encode(
+                texts,
+                batch_size=self.batch_size,
+                convert_to_numpy=True
             )
+        )
 
-            sbert_absdiff = np.mean(np.abs(title_emb - abs_emb), axis=1)
-            sbert_dot = np.sum(title_emb * abs_emb, axis=1)
-        else:
-            sbert_cos = np.zeros(len(df))
-            sbert_absdiff = np.zeros(len(df))
-            sbert_dot = np.zeros(len(df))
+    # ---------------------------------------------------------
+    # SAVE components
+    # ---------------------------------------------------------
+    def save_components(self, out_dir):
+        obj = {
+            "tfidf": self.tfidf,
+            "svd": self.svd,
+            "scaler": self.scaler
+        }
+        out_path = os.path.join(out_dir, "feature_builder.joblib")
+        joblib.dump(obj, out_path)
+        print("✔ Saved feature components to:", out_path)
 
-        # ============= TF-IDF FEATURES =============
+    # ---------------------------------------------------------
+    # NEW: save wrapper — required by run_pipeline_final.py
+    # ---------------------------------------------------------
+    def save(self, out_dir):
+        """Compatibility wrapper so scripts calling fb.save() still work."""
+        self.save_components(out_dir)
+
+    # ---------------------------------------------------------
+    # LOAD components (TF-IDF, SVD & Scaler)
+    # ---------------------------------------------------------
+    def load_components(self, directory):
+        path = os.path.join(directory, "feature_builder.joblib")
+        data = joblib.load(path)  # this is a DICT
+
+        self.tfidf = data["tfidf"]
+        self.svd = data["svd"]
+        self.scaler = data["scaler"]
+
+        print("✔ Loaded TF-IDF, SVD & Scaler from:", path)
+
+    # ---------------------------------------------------------
+    # Build the EXACT 10-feature vector used in LightGBM
+    # ---------------------------------------------------------
+    def build_feature_matrix(self, df, fit_tfidf=False, return_vectors=False):
+
+        titles = df["title"].astype(str).apply(simple_clean).tolist()
+        abstracts = df["abstract"].astype(str).apply(simple_clean).tolist()
+
+        # -----------------------------------------------------
+        # (1) SBERT embeddings
+        # -----------------------------------------------------
+        self.load_sbert()
+
+        sbert_title = self.encode_sbert(titles)
+        sbert_abs = self.encode_sbert(abstracts)
+
+        # cosine similarity
+        sbert_cos = np.sum(sbert_title * sbert_abs, axis=1) / (
+            np.linalg.norm(sbert_title, axis=1) * np.linalg.norm(sbert_abs, axis=1)
+        )
+
+        # -----------------------------------------------------
+        # (2) TF-IDF → SVD
+        # -----------------------------------------------------
+        combined_texts = [t + " " + a for t, a in zip(titles, abstracts)]
+
         if fit_tfidf:
-            self.tfidf_title = TfidfVectorizer(max_features=5000)
-            title_vecs = self.tfidf_title.fit_transform(titles)
-
-            self.tfidf_abs = TfidfVectorizer(max_features=20000)
-            abs_vecs = self.tfidf_abs.fit_transform(abstracts)
+            self.tfidf = TfidfVectorizer(max_features=20000)
+            tfidf_mat = self.tfidf.fit_transform(combined_texts)
 
             self.svd = TruncatedSVD(n_components=300)
-            abs_svd = self.svd.fit_transform(abs_vecs)
+            svd_feat = self.svd.fit_transform(tfidf_mat)
         else:
-            title_vecs = self.tfidf_title.transform(titles)
-            abs_vecs = self.tfidf_abs.transform(abstracts)
-            abs_svd = self.svd.transform(abs_vecs)
+            tfidf_mat = self.tfidf.transform(combined_texts)
+            svd_feat = self.svd.transform(tfidf_mat)
 
-        from sklearn.metrics.pairwise import cosine_similarity
-        tfidf_cosine = np.zeros(len(df))
+        svd_first3 = svd_feat[:, :3]
 
+        # -----------------------------------------------------
+        # (3) Hand-crafted features
+        # -----------------------------------------------------
+        len_title = np.array([len(t.split()) for t in titles])
+        len_abs = np.array([len(a.split()) for a in abstracts])
+        len_ratio = len_title / (len_abs + 1)
 
+        overlap = np.array([
+            len(set(t.split()).intersection(set(a.split())))
+            for t, a in zip(titles, abstracts)
+        ])
 
-        # ============= STRUCTURAL FEATURES =============
-        title_len = np.array([len(t.split()) for t in titles])
-        abs_len = np.array([len(a.split()) for a in abstracts])
+        overlap_ratio = overlap / (len_abs + 1)
 
-        # Simple overlap
-        def overlap(t, a):
-            t_s = set(t.split())
-            a_s = set(a.split())
-            if len(t_s) == 0: 
-                return 0
-            return len(t_s & a_s) / len(t_s)
+        # -----------------------------------------------------
+        # (4) Final 10-feature matrix
+        # -----------------------------------------------------
+        X = np.column_stack([
+            sbert_cos,       # 1
+            svd_first3,      # 3 → total 4
+            len_title,       # 5
+            len_abs,         # 6
+            len_ratio,       # 7
+            overlap,         # 8
+            overlap_ratio    # 9
+        ])
 
-        word_overlap = np.array([overlap(t, a) for t, a in zip(titles, abstracts)])
+        # Note: 9 features — your SVD gives 3 comps + 6 handcrafted
+        # LightGBM is trained on these exact 9.
 
-        # ============= MERGE ALL FEATURES =============
-        X_numeric = np.vstack([
-            sbert_cos,
-            tfidf_cosine,
-            word_overlap,
-            sbert_absdiff,
-            sbert_dot,
-            title_len,
-            abs_len
-        ]).T
+        # -----------------------------------------------------
+        # Apply scaler from training
+        # -----------------------------------------------------
+        if self.scaler is not None:
+            X = self.scaler.transform(X)
 
-        # ============= FINAL SCALING FIX =============
-        if fit_tfidf:
-            self.scaler = MinMaxScaler()
-            X_scaled = self.scaler.fit_transform(X_numeric)
-        else:
-            X_scaled = self.scaler.transform(X_numeric)
-
-        if return_vectors:
-            return X_scaled, title_vecs, abs_vecs
-
-        return X_scaled, None, None
+        return X, X.shape[1], None

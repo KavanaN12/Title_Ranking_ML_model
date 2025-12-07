@@ -10,3 +10,4 @@ scipy
 nltk
 rouge-score
 matplotlib
+streamlit
