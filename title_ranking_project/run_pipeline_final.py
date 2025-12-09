@@ -36,7 +36,7 @@ from src.features_fusion import FeatureFusionBuilder
 # -------------------------
 # CONFIG
 # -------------------------
-DATASET_FOLDER = "D:/aimlTextPr/datasets"
+DATASET_FOLDER = "../datasets/icml"
 CROSSREF_TRAIN_PATH = os.path.join(DATASET_FOLDER, "train_real_world_dataset_10000.csv")
 EVAL_TEST_PATH = os.path.join(DATASET_FOLDER, "real_world_dataset_2000_cleaned.csv")
 OUT_DIR = "outputs"

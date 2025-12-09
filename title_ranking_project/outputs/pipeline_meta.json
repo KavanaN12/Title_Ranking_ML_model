@@ -1,7 +1,7 @@
 {
-  "rows_used": 15000,
+  "rows_used": 6853,
   "feature_count": 9,
   "sbert_model": "sentence-transformers/paraphrase-MiniLM-L6-v2",
-  "target_mean": 0.6153921484947205,
-  "target_std": 0.12712091207504272
+  "target_mean": 0.6195805072784424,
+  "target_std": 0.08934712409973145
 }
